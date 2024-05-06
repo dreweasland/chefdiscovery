@@ -17,6 +17,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
+
 	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/discovery"
@@ -31,11 +32,8 @@ const (
 	chefLabelNodeName        = chefLabel + "node_name"
 	chefLabelNodeOSType      = chefLabel + "node_os_type"
 	chefLabelNodeEnvironment = chefLabel + "node_environment"
-	chefLabelNodePrivateIP   = chefLabel + "node_private_ip"
-	chefLabelNodePublicIP    = chefLabel + "node_public_ip"
+	chefLabelNodeIP          = chefLabel + "node_ip"
 	chefLabelNodeAttribute   = chefLabel + "node_attribute_"
-	chefLabelNodeTag         = chefLabel + "node_tag"
-	chefLabelNodeRole        = chefLabel + "node_role"
 
 	namespace = "prometheus"
 )
@@ -48,20 +46,10 @@ var (
 		IgnoreSSL:       false,
 		MetaAttribute:   []map[string]interface{}{},
 	}
-
-	bootstrapFail = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "sd_chef_bootstrap_fail",
-			Help:      "Outputs a 1 if a node is detected that appears to not be correctly bootstrapped",
-		},
-		[]string{"node"},
-	)
 )
 
 func init() {
 	discovery.RegisterConfig(&SDConfig{})
-	prometheus.MustRegister(bootstrapFail)
 }
 
 // SDConfig is the configuration for Chef based service discovery.
@@ -80,12 +68,17 @@ type ChefClient struct {
 	*chef.Client
 }
 
+// NewDiscovererMetrics implements discovery.Config.
+func (*SDConfig) NewDiscovererMetrics(reg prometheus.Registerer, rmi discovery.RefreshMetricsInstantiator) discovery.DiscovererMetrics {
+	return newDiscovererMetrics(reg, rmi)
+}
+
 // Name returns the name of the Config.
 func (*SDConfig) Name() string { return "chef" }
 
 // NewDiscoverer returns a Discoverer for the Config.
 func (c *SDConfig) NewDiscoverer(opts discovery.DiscovererOptions) (discovery.Discoverer, error) {
-	return NewDiscovery(c, opts.Logger), nil
+	return NewDiscovery(c, opts.Logger, opts.Metrics)
 }
 
 func validateAuthParam(param, name string) error {
@@ -128,28 +121,41 @@ func (c *SDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 type Discovery struct {
 	*refresh.Discovery
-	logger log.Logger
-	cfg    *SDConfig
-	port   int
+	logger  log.Logger
+	cfg     *SDConfig
+	port    int
+	metrics *chefMetrics
 }
 
 // NewDiscovery returns a new ChefDiscovery which periodically refreshes its targets.
-func NewDiscovery(cfg *SDConfig, logger log.Logger) *Discovery {
+func NewDiscovery(cfg *SDConfig, logger log.Logger, metrics discovery.DiscovererMetrics) (*Discovery, error) {
+	m, ok := metrics.(*chefMetrics)
+	if !ok {
+		return nil, fmt.Errorf("invalid discovery metrics type")
+	}
+
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
+
 	d := &Discovery{
-		cfg:    cfg,
-		port:   cfg.Port,
-		logger: logger,
+		cfg:     cfg,
+		port:    cfg.Port,
+		logger:  logger,
+		metrics: m,
 	}
+
 	d.Discovery = refresh.NewDiscovery(
-		logger,
-		"chef",
-		time.Duration(cfg.RefreshInterval),
-		d.refresh,
+		refresh.Options{
+			Logger:              logger,
+			Mech:                "chef",
+			Interval:            time.Duration(cfg.RefreshInterval),
+			RefreshF:            d.refresh,
+			MetricsInstantiator: m.refreshMetrics,
+		},
 	)
-	return d
+
+	return d, nil
 }
 
 // createChefClient is a helper function for creating a Chef server connection.
@@ -178,6 +184,7 @@ func createChefClient(cfg SDConfig) (*ChefClient, error) {
 	if err != nil {
 		return &ChefClient{}, err
 	}
+
 	return &ChefClient{client}, nil
 }
 
@@ -213,8 +220,7 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 				chefLabelNodeName:        model.LabelValue(node.Attribute["hostname"].(string)),
 				chefLabelNodeOSType:      model.LabelValue(node.Attribute["os"].(string)),
 				chefLabelNodeEnvironment: model.LabelValue(node.Attribute["chef_environment"].(string)),
-				chefLabelNodeTag:         model.LabelValue(strings.Join(unwrapArray(node.Attribute["tags"]), ",")),
-				chefLabelNodeRole:        model.LabelValue(strings.Join(unwrapArray(node.Attribute["roles"]), ",")),
+				chefLabelNodeIP:          model.LabelValue(node.Attribute["ipaddress"].(string)),
 			}
 
 			for _, attr := range d.cfg.MetaAttribute {
@@ -232,7 +238,7 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 
 			tg.Targets = append(tg.Targets, label)
 		} else {
-			bootstrapFail.WithLabelValues(node.ID).Inc()
+			d.metrics.bootstrapFailure.WithLabelValues(node.ID).Inc()
 		}
 	}
 
