@@ -34,6 +34,8 @@ const (
 	chefLabelNodeEnvironment = chefLabel + "node_environment"
 	chefLabelNodeIP          = chefLabel + "node_ip"
 	chefLabelNodeAttribute   = chefLabel + "node_attribute_"
+	chefLabelNodeTag         = chefLabel + "node_tag"
+	chefLabelNodeRole        = chefLabel + "node_role"
 
 	namespace = "prometheus"
 )
@@ -100,6 +102,7 @@ func (c *SDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	if err = validateAuthParam(c.UserID, "user_id"); err != nil {
 		return err
 	}
+
 	if err = validateAuthParam(c.ChefServer, "chef_server"); err != nil {
 		return err
 	}
@@ -221,6 +224,8 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 				chefLabelNodeOSType:      model.LabelValue(node.Attribute["os"].(string)),
 				chefLabelNodeEnvironment: model.LabelValue(node.Attribute["chef_environment"].(string)),
 				chefLabelNodeIP:          model.LabelValue(node.Attribute["ipaddress"].(string)),
+				chefLabelNodeTag:         model.LabelValue(strings.Join(unwrapArray(node.Attribute["tags"]), ",")),
+				chefLabelNodeRole:        model.LabelValue(strings.Join(unwrapArray(node.Attribute["roles"]), ",")),
 			}
 
 			for _, attr := range d.cfg.MetaAttribute {
