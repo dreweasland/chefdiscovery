@@ -16,7 +16,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
-	"github.com/prometheus/promslog"
+	"github.com/prometheus/common/promslog"
 
 	"github.com/prometheus/common/model"
 
