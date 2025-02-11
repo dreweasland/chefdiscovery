@@ -3,6 +3,7 @@ package chef
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"reflect"
@@ -11,12 +12,11 @@ import (
 	"time"
 
 	"github.com/go-chef/chef"
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"github.com/imdario/mergo"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
+	"github.com/prometheus/promslog"
 
 	"github.com/prometheus/common/model"
 
@@ -124,21 +124,21 @@ func (c *SDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 type Discovery struct {
 	*refresh.Discovery
-	logger  log.Logger
+	logger  *slog.Logger
 	cfg     *SDConfig
 	port    int
 	metrics *chefMetrics
 }
 
 // NewDiscovery returns a new ChefDiscovery which periodically refreshes its targets.
-func NewDiscovery(cfg *SDConfig, logger log.Logger, metrics discovery.DiscovererMetrics) (*Discovery, error) {
+func NewDiscovery(cfg *SDConfig, logger *slog.Logger, metrics discovery.DiscovererMetrics) (*Discovery, error) {
 	m, ok := metrics.(*chefMetrics)
 	if !ok {
 		return nil, fmt.Errorf("invalid discovery metrics type")
 	}
 
 	if logger == nil {
-		logger = log.NewNopLogger()
+		logger = promslog.NewNopLogger()
 	}
 
 	d := &Discovery{
@@ -199,7 +199,7 @@ type virtualMachine struct {
 }
 
 func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
-	defer level.Debug(d.logger).Log("msg", "Chef discovery completed")
+	defer d.logger.Debug("Chef discovery completed")
 
 	client, err := createChefClient(*d.cfg)
 	if err != nil {
@@ -211,7 +211,7 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 		return nil, errors.Wrap(err, "could not get nodes")
 	}
 
-	level.Debug(d.logger).Log("msg", "Found nodes during Chef discovery.", "count", len(nodes))
+	d.logger.Debug("Found nodes during Chef discovery.", "count", len(nodes))
 
 	tg := &targetgroup.Group{}
 	for _, node := range nodes {
