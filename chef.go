@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/go-chef/chef"
-	"github.com/imdario/mergo"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
@@ -40,15 +39,13 @@ const (
 	namespace = "prometheus"
 )
 
-var (
-	// DefaultSDConfig is the default Chef SD configuration.
-	DefaultSDConfig = SDConfig{
-		Port:            9090,
-		RefreshInterval: model.Duration(5 * time.Minute),
-		IgnoreSSL:       false,
-		MetaAttribute:   []map[string]interface{}{},
-	}
-)
+// DefaultSDConfig is the default Chef SD configuration.
+var DefaultSDConfig = SDConfig{
+	Port:            9090,
+	RefreshInterval: model.Duration(5 * time.Minute),
+	IgnoreSSL:       false,
+	MetaAttribute:   []map[string]interface{}{},
+}
 
 func init() {
 	discovery.RegisterConfig(&SDConfig{})
@@ -307,11 +304,7 @@ func mergeMaps(maps ...map[string]interface{}) map[string]interface{} {
 	result := make(map[string]interface{})
 	for _, m := range maps {
 		for k, v := range m {
-			if _, ok := result[k]; ok {
-				mergo.Merge(result[k], v, mergo.WithOverride)
-			} else {
-				result[k] = v
-			}
+			result[k] = v
 		}
 	}
 	return result
