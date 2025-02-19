@@ -269,20 +269,39 @@ func (client *ChefClient) getNodes(ctx context.Context) ([]virtualMachine, error
 
 // mapFromNode gets passed Chef NodeID and returns captured Chef Server attributes
 func (client *ChefClient) mapFromNode(node string, url string) (virtualMachine, error) {
-	nodeCheck, err := client.Nodes.Get(node)
+	n, err := client.Nodes.Get(node)
 	if err != nil {
 		return virtualMachine{}, errors.Wrap(err, fmt.Sprintf("could not get node attributes for %v", node))
 	}
 
 	// All Chef attribute types ordered by precedence (Last one wins)
-	attributeTypes := []map[string]interface{}{nodeCheck.DefaultAttributes, nodeCheck.NormalAttributes, nodeCheck.OverrideAttributes, nodeCheck.AutomaticAttributes}
-	chefAttribute := mergeMaps(attributeTypes...)
+	getAttributes := []map[string]interface{}{n.DefaultAttributes, n.NormalAttributes, n.OverrideAttributes, n.AutomaticAttributes}
+	attributes := deepMerge(getAttributes...)
 
 	return virtualMachine{
 		ID:        node,
 		URL:       url,
-		Attribute: chefAttribute,
+		Attribute: attributes,
 	}, nil
+}
+
+func deepMerge(sources ...map[string]interface{}) map[string]interface{} {
+	dest := make(map[string]interface{})
+	for _, source := range sources {
+		for key, sourceVal := range source {
+			if destVal, ok := dest[key]; ok {
+				// If the key exists in both maps, perform a deeper merge
+				if nestedDestMap, destIsMap := destVal.(map[string]interface{}); destIsMap {
+					if nestedSourceMap, sourceIsMap := sourceVal.(map[string]interface{}); sourceIsMap {
+						dest[key] = deepMerge(nestedDestMap, nestedSourceMap) // Recursive call
+						continue
+					}
+				}
+			}
+			dest[key] = sourceVal // If the key doesn't exist, simply add it
+		}
+	}
+	return dest
 }
 
 // function for unwrapping arrays into a string for label values
@@ -297,17 +316,6 @@ func unwrapArray(t interface{}) []string {
 		}
 	}
 	return arr
-}
-
-// function for merging multiple maps
-func mergeMaps(maps ...map[string]interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
-	for _, m := range maps {
-		for k, v := range m {
-			result[k] = v
-		}
-	}
-	return result
 }
 
 // function for getting passed a list of chef attributes to be collected for relabelling
