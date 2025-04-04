@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,10 +16,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
-	"github.com/prometheus/common/promslog"
-
 	"github.com/prometheus/common/model"
-
+	"github.com/prometheus/common/promslog"
 	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/discovery/refresh"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
@@ -37,6 +36,12 @@ const (
 	chefLabelNodeRole        = chefLabel + "node_role"
 
 	namespace = "prometheus"
+)
+
+// Pre-compile regex patterns to avoid recompilation on every call.
+var (
+	escapeRegex     = regexp.MustCompile(`\\_`)
+	underscoreRegex = regexp.MustCompile(`_`)
 )
 
 // DefaultSDConfig is the default Chef SD configuration.
@@ -167,7 +172,7 @@ func createChefClient(cfg SDConfig) (*ChefClient, error) {
 	} else {
 		io, err := os.ReadFile(cfg.UserKeyLocation)
 		if err != nil {
-			return &ChefClient{}, err
+			return nil, err
 		}
 		key = string(io)
 	}
@@ -180,15 +185,14 @@ func createChefClient(cfg SDConfig) (*ChefClient, error) {
 	}
 
 	client, err := chef.NewClient(&config)
-
 	if err != nil {
-		return &ChefClient{}, err
+		return nil, err
 	}
 
 	return &ChefClient{client}, nil
 }
 
-// virtualMachine represents a Chef node
+// virtualMachine represents a Chef node.
 type virtualMachine struct {
 	ID        string
 	URL       string
@@ -210,17 +214,22 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 
 	d.logger.Debug("Found nodes during Chef discovery.", "count", len(nodes))
 
-	tg := &targetgroup.Group{}
+	// Preallocate target slice
+	tg := &targetgroup.Group{
+		Targets: make([]model.LabelSet, 0, len(nodes)),
+	}
+
 	for _, node := range nodes {
-		if node.Attribute["ipaddress"] != nil {
+		if ipRaw, ok := node.Attribute["ipaddress"]; ok {
+			ip, _ := ipRaw.(string)
 			label := model.LabelSet{
-				model.AddressLabel:       model.LabelValue(net.JoinHostPort(node.Attribute["ipaddress"].(string), fmt.Sprintf("%d", d.port))),
+				model.AddressLabel:       model.LabelValue(net.JoinHostPort(ip, strconv.Itoa(d.port))),
 				chefLabelNodeID:          model.LabelValue(node.ID),
 				chefLabelNodeURL:         model.LabelValue(node.URL),
 				chefLabelNodeName:        model.LabelValue(node.Attribute["hostname"].(string)),
 				chefLabelNodeOSType:      model.LabelValue(node.Attribute["os"].(string)),
 				chefLabelNodeEnvironment: model.LabelValue(node.Attribute["chef_environment"].(string)),
-				chefLabelNodeIP:          model.LabelValue(node.Attribute["ipaddress"].(string)),
+				chefLabelNodeIP:          model.LabelValue(ip),
 				chefLabelNodeTag:         model.LabelValue(strings.Join(unwrapArray(node.Attribute["tags"]), ",")),
 				chefLabelNodeRole:        model.LabelValue(strings.Join(unwrapArray(node.Attribute["roles"]), ",")),
 			}
@@ -229,11 +238,11 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 				res := metaAttr(attr, node)
 				if res != nil {
 					for k, v := range attr {
+						keyName := k
 						if v != nil {
-							label[chefLabelNodeAttribute+model.LabelName(v.(string))] = model.LabelValue(fmt.Sprintf("%v", res))
-						} else {
-							label[chefLabelNodeAttribute+model.LabelName(k)] = model.LabelValue(fmt.Sprintf("%v", res))
+							keyName = v.(string)
 						}
+						label[chefLabelNodeAttribute+model.LabelName(keyName)] = model.LabelValue(fmt.Sprintf("%v", res))
 					}
 				}
 			}
@@ -247,7 +256,7 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	return []*targetgroup.Group{tg}, nil
 }
 
-// getNodes connects to Chef Client and returns an array of virtualMachines
+// getNodes connects to Chef Client and returns an array of virtualMachines.
 func (client *ChefClient) getNodes(ctx context.Context) ([]virtualMachine, error) {
 	var nodes []virtualMachine
 
@@ -267,14 +276,14 @@ func (client *ChefClient) getNodes(ctx context.Context) ([]virtualMachine, error
 	return nodes, nil
 }
 
-// mapFromNode gets passed Chef NodeID and returns captured Chef Server attributes
+// mapFromNode gets passed a Chef NodeID and returns captured Chef Server attributes.
 func (client *ChefClient) mapFromNode(node string, url string) (virtualMachine, error) {
 	n, err := client.Nodes.Get(node)
 	if err != nil {
 		return virtualMachine{}, errors.Wrap(err, fmt.Sprintf("could not get node attributes for %v", node))
 	}
 
-	// All Chef attribute types ordered by precedence (Last one wins)
+	// All Chef attribute types ordered by precedence (last one wins)
 	getAttributes := []map[string]interface{}{n.DefaultAttributes, n.NormalAttributes, n.OverrideAttributes, n.AutomaticAttributes}
 	attributes := deepMerge(getAttributes...)
 
@@ -290,27 +299,41 @@ func deepMerge(sources ...map[string]interface{}) map[string]interface{} {
 	for _, source := range sources {
 		for key, sourceVal := range source {
 			if destVal, ok := dest[key]; ok {
-				// If the key exists in both maps, perform a deeper merge
+				// If both values are maps, merge recursively.
 				if nestedDestMap, destIsMap := destVal.(map[string]interface{}); destIsMap {
 					if nestedSourceMap, sourceIsMap := sourceVal.(map[string]interface{}); sourceIsMap {
-						dest[key] = deepMerge(nestedDestMap, nestedSourceMap) // Recursive call
+						dest[key] = deepMerge(nestedDestMap, nestedSourceMap)
 						continue
 					}
 				}
 			}
-			dest[key] = sourceVal // If the key doesn't exist, simply add it
+			dest[key] = sourceVal
 		}
 	}
 	return dest
 }
 
-// function for unwrapping arrays into a string for label values
+// unwrapArray converts an interface{} slice to a []string.
 func unwrapArray(t interface{}) []string {
+	// If already a []string, return directly.
+	if arr, ok := t.([]string); ok {
+		return arr
+	}
+	// Check for []interface{} and convert.
+	if arr, ok := t.([]interface{}); ok {
+		out := make([]string, 0, len(arr))
+		for _, v := range arr {
+			if s, ok := v.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	// Fallback to reflection if necessary.
 	arr := []string{}
 	switch reflect.TypeOf(t).Kind() {
 	case reflect.Slice:
 		s := reflect.ValueOf(t)
-
 		for i := 0; i < s.Len(); i++ {
 			arr = append(arr, s.Index(i).Interface().(string))
 		}
@@ -318,29 +341,29 @@ func unwrapArray(t interface{}) []string {
 	return arr
 }
 
-// function for getting passed a list of chef attributes to be collected for relabelling
+// metaAttr retrieves the specified Chef attribute from a virtualMachine.
+// It splits the configuration key using underscores while allowing escaping.
 func metaAttr(h map[string]interface{}, n virtualMachine) interface{} {
 	var res interface{}
 	for k := range h {
-		escape := regexp.MustCompile(`\\_`)
-		escaped := escape.ReplaceAllString(k, `\\`)
-		re := regexp.MustCompile(`_`)
-		a := re.Split(escaped, -1)
-		attr := n.Attribute
-
-		for i, y := range a {
-			a[i] = strings.ReplaceAll(y, `\\`, `_`)
+		// Use precompiled regex to handle escaping.
+		escaped := escapeRegex.ReplaceAllString(k, `\\`)
+		parts := underscoreRegex.Split(escaped, -1)
+		// Restore escaped underscores.
+		for i, part := range parts {
+			parts[i] = strings.ReplaceAll(part, `\\`, `_`)
 		}
 
-		for _, z := range a {
-			if attr[z] != nil {
-				b := reflect.TypeOf(attr[z]).Kind()
-				switch b {
-				case reflect.Map:
-					attr = attr[z].(map[string]interface{})
-				default:
-					res = attr[z]
-					attr = map[string]interface{}{}
+		attr := n.Attribute
+		for _, p := range parts {
+			if attr[p] != nil {
+				// If nested attribute is a map, continue traversing.
+				if nested, ok := attr[p].(map[string]interface{}); ok {
+					attr = nested
+				} else {
+					res = attr[p]
+					// Optionally, return early when a non-map value is found.
+					return res
 				}
 			}
 		}
