@@ -315,6 +315,9 @@ func deepMerge(sources ...map[string]interface{}) map[string]interface{} {
 
 // unwrapArray converts an interface{} slice to a []string.
 func unwrapArray(t interface{}) []string {
+	if t == nil {
+		return []string{}
+	}
 	// If already a []string, return directly.
 	if arr, ok := t.([]string); ok {
 		return arr
@@ -330,15 +333,17 @@ func unwrapArray(t interface{}) []string {
 		return out
 	}
 	// Fallback to reflection if necessary.
-	arr := []string{}
-	switch reflect.TypeOf(t).Kind() {
-	case reflect.Slice:
-		s := reflect.ValueOf(t)
-		for i := 0; i < s.Len(); i++ {
-			arr = append(arr, s.Index(i).Interface().(string))
+	val := reflect.ValueOf(t)
+	if val.Kind() == reflect.Slice {
+		out := make([]string, 0, val.Len())
+		for i := 0; i < val.Len(); i++ {
+			if s, ok := val.Index(i).Interface().(string); ok {
+				out = append(out, s)
+			}
 		}
+		return out
 	}
-	return arr
+	return []string{}
 }
 
 // metaAttr retrieves the specified Chef attribute from a virtualMachine.
